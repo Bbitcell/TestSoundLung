@@ -44,13 +44,53 @@ def trim_silence(samples, sr, drop_db=32.0, keep_s=0.04):
     return samples[start:end] if end - start > win else samples
 
 
-def to_sound(data, clip_transients=False):
+def stable_window(samples, sr, want_s=1.5):
+    """Steadiest `want_s` of a sustained vowel. Clinical protocols measure the
+    stable middle of a phonation anyway, and it side-steps microphone
+    processing: noise suppression mistakes a steady tone for background noise
+    and ducks it after a couple of seconds, and auto-gain rides the level.
+
+    1.5 s matches the training clips (SVD /a/ is 1.36 s median) and perturbs the
+    features least - see stable_window in ../app.py for the measurements."""
+    n = int(want_s * sr)
+    if len(samples) <= n:
+        return samples
+    win = max(int(0.02 * sr), 1)
+    nf = len(samples) // win
+    env = np.sqrt((samples[:nf * win].reshape(nf, win) ** 2).mean(axis=1))
+    fpw = max(int(want_s / 0.02), 1)
+    best, best_score = 0, np.inf
+    for s0 in range(0, nf - fpw + 1, 2):
+        seg = env[s0:s0 + fpw]
+        if seg.mean() <= 0:
+            continue
+        score = seg.std() / seg.mean()
+        if score < best_score:
+            best_score, best = score, s0
+    return samples[best * win: best * win + n]
+
+
+def level_drift_db(samples, sr, edge_s=0.7):
+    """Loudness change from the start to the end of a sustained vowel; a large
+    value means the microphone or its driver is processing the signal."""
+    n = int(edge_s * sr)
+    if len(samples) < 3 * n:
+        return 0.0
+    first, last = np.sqrt(np.mean(samples[:n] ** 2)), np.sqrt(np.mean(samples[-n:] ** 2))
+    if first <= 0 or last <= 0:
+        return 0.0
+    return float(20 * np.log10(last / first))
+
+
+def to_sound(data, clip_transients=False, steady=False):
     samples, sr = read_audio(data)
     if clip_transients:
         ref = np.percentile(np.abs(samples), 99.0)
         if ref > 0:
             samples = np.clip(samples, -ref, ref)
     samples = trim_silence(samples, sr)
+    if steady:
+        samples = stable_window(samples, sr)
     peak = np.abs(samples).max()
     if peak > 0:
         samples = samples / peak
@@ -160,27 +200,34 @@ def _maxpool2(x):
 
 
 class SoundLungModels:
+    """Two classifiers: "voice" (vowel + sex; immune to speaking rate) and
+    "full" (adds the sentence, including its duration — more accurate on the
+    database but responds to how fast the speaker talks)."""
+
+    VARIANTS = ("voice", "full")
+
     def __init__(self, npz_path):
         z = np.load(npz_path, allow_pickle=False)
         self.z = {k: z[k] for k in z.files}
-        self.features = [str(f) for f in self.z["G_features"]]
-        self.n_models = int(self.z["G_n_models"])
-        self.scaler_mean = self.z["G_scaler_mean"]
-        self.scaler_scale = self.z["G_scaler_scale"]
-        self.inv_cov = self.z["G_inv_cov"]
-        self.ood_threshold = float(self.z["G_ood_threshold"])
-        self.threshold = float(self.z["G_threshold"])
-        self.val_auc = float(self.z["G_val_auc"])
+        self.features = {v: [str(f) for f in self.z[f"{v}_features"]] for v in self.VARIANTS}
+        self.val_auc = {v: float(self.z[f"{v}_val_auc"]) for v in self.VARIANTS}
+        self.threshold = float(self.z["voice_threshold"])
         self.spec_mu = float(self.z["I_spec_mu"])
         self.spec_sd = float(self.z["I_spec_sd"])
 
+    def standardise(self, feats, variant):
+        x = np.array([feats[f] for f in self.features[variant]], dtype=np.float64)
+        return (x - self.z[f"{variant}_scaler_mean"]) / self.z[f"{variant}_scaler_scale"]
+
     # --- young/old ensemble
-    def prob_old_standardised(self, x_std):
+    def prob_old_standardised(self, x_std, variant="voice"):
         outs = []
-        for i in range(self.n_models):
-            h = x_std @ self.z[f"G{i}_net_0_weight"].T + self.z[f"G{i}_net_0_bias"]
+        for i in range(int(self.z[f"{variant}_n_models"])):
+            h = x_std @ self.z[f"{variant}_{i}_net_0_weight"].T + \
+                self.z[f"{variant}_{i}_net_0_bias"]
             h = np.maximum(h, 0)
-            logit = h @ self.z[f"G{i}_net_3_weight"].T + self.z[f"G{i}_net_3_bias"]
+            logit = h @ self.z[f"{variant}_{i}_net_3_weight"].T + \
+                self.z[f"{variant}_{i}_net_3_bias"]
             outs.append(1.0 / (1.0 + np.exp(-logit)))
         return float(np.mean(outs))
 
@@ -199,7 +246,11 @@ class SoundLungModels:
 
     # --- full pipeline
     def analyse(self, gender, vowel_bytes, phrase_bytes):
-        feats = dict(vowel_features(to_sound(vowel_bytes), gender))
+        # vowel: steadiest stretch only (the phrase stays whole - its duration
+        # is itself a feature)
+        feats = dict(vowel_features(to_sound(vowel_bytes, steady=True), gender))
+        v_samples, v_sr = read_audio(vowel_bytes)
+        drift = level_drift_db(trim_silence(v_samples, v_sr), v_sr)
         try:
             feats.update(phrase_features(to_sound(phrase_bytes)))
         except Exception:
@@ -212,26 +263,28 @@ class SoundLungModels:
                     f"a little louder, and start ~1 s after pressing record.") from None
         feats["Gender_num"] = 1.0 if gender == "M" else 0.0
 
-        x = np.array([feats[f] for f in self.features], dtype=np.float64)
-        x_std = (x - self.scaler_mean) / self.scaler_scale
-        prob = self.prob_old_standardised(x_std)
+        probs = {v: self.prob_old_standardised(self.standardise(feats, v), v)
+                 for v in self.VARIANTS}
+        prob = probs["voice"]          # rate-invariant model gives the verdict
 
-        dist = float(np.sqrt(x_std @ self.inv_cov @ x_std.T))
-        reliable = dist <= self.ood_threshold
+        xf = self.standardise(feats, "full")
+        dist = float(np.sqrt(xf @ self.z["full_inv_cov"] @ xf.T))
+        reliable = dist <= float(self.z["full_ood_threshold"])
         odd = []
         if not reliable:
-            for i in np.argsort(-np.abs(x_std)):
-                f = self.features[i]
-                if f == "Gender_num" or abs(x_std[i]) < 2:
+            for i in np.argsort(-np.abs(xf)):
+                f = self.features["full"][i]
+                if f == "Gender_num" or abs(xf[i]) < 2:
                     continue
                 odd.append(f"{f} = {feats[f]:.2f} "
-                           f"({abs(x_std[i]):.1f} SD {'high' if x_std[i] > 0 else 'low'})")
+                           f"({abs(xf[i]):.1f} SD {'high' if xf[i] > 0 else 'low'})")
 
         samples, sr = read_audio(phrase_bytes)
         spec = log_mel(trim_silence(samples, sr), sr)
         age = self.cnn_age_from_standardised_spec((spec - self.spec_mu) / self.spec_sd)
 
-        return {"features": feats, "prob_old": prob,
-                "label": "old (60+)" if prob > self.threshold else "young (18-30)",
+        label = lambda p: "old (60+)" if p > self.threshold else "young (18-30)"
+        return {"features": feats, "prob_old": prob, "label": label(prob),
+                "prob_old_rate": probs["full"], "label_rate": label(probs["full"]),
                 "reliable": reliable, "ood_distance": dist, "out_of_range": odd,
-                "cnn_age": age}
+                "cnn_age": age, "vowel_drift_db": drift}
