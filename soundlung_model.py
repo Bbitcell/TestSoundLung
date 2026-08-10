@@ -204,8 +204,9 @@ class SoundLungModels:
     "full" (adds the sentence, including its duration — more accurate on the
     database but responds to how fast the speaker talks)."""
 
-    FORMAT_VERSION = 3      # must match the stamp written by export_models.py
+    FORMAT_VERSION = 4      # must match the stamp written by export_models.py
     VARIANTS = ("robust", "voice", "full")
+    SEX_MODEL = "sex"       # sex is detected from the voice, never asked for
     VERDICT = "robust"      # immune to both microphone quality and speaking rate
 
     def __init__(self, npz_path):
@@ -216,7 +217,8 @@ class SoundLungModels:
             raise ValueError(
                 f"models.npz is format v{found}, but this soundlung_model.py expects "
                 f"v{self.FORMAT_VERSION}. Re-upload models.npz.")
-        self.features = {v: [str(f) for f in self.z[f"{v}_features"]] for v in self.VARIANTS}
+        self.features = {v: [str(f) for f in self.z[f"{v}_features"]]
+                         for v in self.VARIANTS + (self.SEX_MODEL,)}
         self.val_auc = {v: float(self.z[f"{v}_val_auc"]) for v in self.VARIANTS}
         # per-variant thresholds tuned on validation; class-weighted training
         # inflates probabilities so a fixed 0.5 over-calls "old"
@@ -255,10 +257,18 @@ class SoundLungModels:
         return float(pooled @ self.z["I_head_3_weight"][0] + self.z["I_head_3_bias"][0])
 
     # --- full pipeline
+    def detect_sex(self, feats):
+        """Sex from the voice (97% accurate on validation), so the app does not
+        ask for it; the age verdict scores the same either way."""
+        p_male = self.prob_old_standardised(self.standardise(feats, self.SEX_MODEL),
+                                            self.SEX_MODEL)
+        return ("M" if p_male > 0.5 else "F"), p_male
+
     def analyse(self, gender, vowel_bytes, phrase_bytes):
+        """`gender` may be None, in which case it is detected from the audio."""
         # vowel: steadiest stretch only (the phrase stays whole - its duration
         # is itself a feature)
-        feats = dict(vowel_features(to_sound(vowel_bytes, steady=True), gender))
+        feats = dict(vowel_features(to_sound(vowel_bytes, steady=True), gender or "F"))
         v_samples, v_sr = read_audio(vowel_bytes)
         drift = level_drift_db(trim_silence(v_samples, v_sr), v_sr)
         try:
@@ -271,6 +281,9 @@ class SoundLungModels:
                     f"Could not measure the sentence ({exc}). Recorded: "
                     f"{audio_stats(phrase_bytes)}. Speak closer to the microphone, "
                     f"a little louder, and start ~1 s after pressing record.") from None
+        detected, p_male = self.detect_sex(feats)
+        if gender is None:
+            gender = detected
         feats["Gender_num"] = 1.0 if gender == "M" else 0.0
 
         probs = {v: self.prob_old_standardised(self.standardise(feats, v), v)
@@ -301,4 +314,6 @@ class SoundLungModels:
                 "labels": {v: label(probs[v], v) for v in self.VARIANTS},
                 "prob_old_rate": probs["full"], "label_rate": label(probs["full"], "full"),
                 "reliable": reliable, "ood_distance": dist, "out_of_range": odd,
-                "cnn_age": age, "vowel_drift_db": drift}
+                "cnn_age": age, "vowel_drift_db": drift,
+                "sex": {"detected": detected, "prob_male": p_male,
+                        "confident": abs(p_male - 0.5) > 0.35}}
