@@ -204,14 +204,18 @@ class SoundLungModels:
     "full" (adds the sentence, including its duration — more accurate on the
     database but responds to how fast the speaker talks)."""
 
-    VARIANTS = ("voice", "full")
+    VARIANTS = ("robust", "voice", "full")
+    VERDICT = "robust"      # immune to both microphone quality and speaking rate
 
     def __init__(self, npz_path):
         z = np.load(npz_path, allow_pickle=False)
         self.z = {k: z[k] for k in z.files}
         self.features = {v: [str(f) for f in self.z[f"{v}_features"]] for v in self.VARIANTS}
         self.val_auc = {v: float(self.z[f"{v}_val_auc"]) for v in self.VARIANTS}
-        self.threshold = float(self.z["voice_threshold"])
+        # per-variant thresholds tuned on validation; class-weighted training
+        # inflates probabilities so a fixed 0.5 over-calls "old"
+        self.thresholds = {v: float(self.z[f"{v}_threshold"]) for v in self.VARIANTS}
+        self.threshold = self.thresholds[self.VERDICT]
         self.spec_mu = float(self.z["I_spec_mu"])
         self.spec_sd = float(self.z["I_spec_sd"])
 
@@ -265,7 +269,7 @@ class SoundLungModels:
 
         probs = {v: self.prob_old_standardised(self.standardise(feats, v), v)
                  for v in self.VARIANTS}
-        prob = probs["voice"]          # rate-invariant model gives the verdict
+        prob = probs[self.VERDICT]
 
         xf = self.standardise(feats, "full")
         dist = float(np.sqrt(xf @ self.z["full_inv_cov"] @ xf.T))
@@ -283,8 +287,12 @@ class SoundLungModels:
         spec = log_mel(trim_silence(samples, sr), sr)
         age = self.cnn_age_from_standardised_spec((spec - self.spec_mu) / self.spec_sd)
 
-        label = lambda p: "old (60+)" if p > self.threshold else "young (18-30)"
-        return {"features": feats, "prob_old": prob, "label": label(prob),
-                "prob_old_rate": probs["full"], "label_rate": label(probs["full"]),
+        def label(p, variant):
+            return "old (60+)" if p > self.thresholds[variant] else "young (18-30)"
+
+        return {"features": feats, "prob_old": prob, "label": label(prob, self.VERDICT),
+                "probs": probs,
+                "labels": {v: label(probs[v], v) for v in self.VARIANTS},
+                "prob_old_rate": probs["full"], "label_rate": label(probs["full"], "full"),
                 "reliable": reliable, "ood_distance": dist, "out_of_range": odd,
                 "cnn_age": age, "vowel_drift_db": drift}

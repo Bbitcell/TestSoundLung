@@ -132,15 +132,27 @@ if go:
 
         label_rate = res.get("label_rate")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Voice quality only", verdict, f"p(old) = {res['prob_old']:.2f}",
-                  delta_color="off", help="Vowel + sex. Cannot be influenced by how "
-                                          "fast you speak. Validation AUC 0.74.")
+        c1.metric("Verdict — pitch only", verdict, f"p(old) = {res['prob_old']:.2f}",
+                  delta_color="off",
+                  help="F0, jitter and sex. Unaffected by microphone quality and by "
+                       "how fast you speak. Validation AUC 0.70.")
         if label_rate:
             c2.metric("Including speaking rate", label_rate,
                       f"p(old) = {res['prob_old_rate']:.2f}", delta_color="off",
-                      help="Adds the sentence. More accurate on the database "
-                           "(AUC 0.93) but responds to how fast you talk.")
+                      help="Adds the sentence. Best on the database (AUC 0.93) but "
+                           "partly measures how fast you talk.")
         c3.metric("CNN age estimate", f"≈ {res['cnn_age']:.0f} years")
+
+        if "probs" in res:
+            st.caption("All three classifiers — accuracy on the database rises with "
+                       "each addition, but so does sensitivity to the recording setup:")
+            st.dataframe(
+                {"model": ["pitch only (verdict)", "+ shimmer & HNR", "+ sentence"],
+                 "immune to": ["microphone and speaking rate", "speaking rate", "—"],
+                 "validation AUC": [f"{M.val_auc[v]:.2f}" for v in ("robust", "voice", "full")],
+                 "p(old)": [f"{res['probs'][v]:.2f}" for v in ("robust", "voice", "full")],
+                 "reads as": [res["labels"][v] for v in ("robust", "voice", "full")]},
+                hide_index=True, use_container_width=True)
 
         if label_rate and res["label"] != label_rate:
             st.info(
@@ -183,11 +195,11 @@ if go:
 st.divider()
 st.caption(
     f"Classifiers: 10-model ensembles trained on the Saarbrücken Voice Database "
-    f"(speaker-grouped split). Voice-quality model — vowel + sex, validation AUC "
-    f"{M.val_auc['voice']:.2f}, unaffected by speaking rate. Rate-sensitive model — "
-    f"adds the sentence, AUC {M.val_auc['full']:.2f}, but sentence duration is its "
-    f"strongest feature (r = +0.59 with age), so it partly measures how fast someone "
-    f"talks. Age estimate: small CNN over the sentence spectrogram. Example recordings "
-    f"© Saarbrücken Voice Database, CC-BY 4.0. Recordings are analysed in memory and "
-    f"are not stored."
+    f"(speaker-grouped split, decision thresholds tuned on validation). The verdict "
+    f"uses pitch features only (AUC {M.val_auc['robust']:.2f}) because the more "
+    f"accurate models lean on measurements that a consumer microphone distorts "
+    f"(shimmer, HNR) or on sentence duration (AUC {M.val_auc['full']:.2f}), which "
+    f"correlates +0.59 with age but is under the speaker's control. Age estimate: "
+    f"small CNN over the sentence spectrogram. Example recordings © Saarbrücken Voice "
+    f"Database, CC-BY 4.0. Recordings are analysed in memory and are not stored."
 )
