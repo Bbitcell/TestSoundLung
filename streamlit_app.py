@@ -39,8 +39,11 @@ gender = "M" if st.radio("Sex", ["Female", "Male"], horizontal=True,
 
 # ------------------------------------------------------------- 2. recordings
 st.subheader("2 · Sustained vowel")
-st.markdown("Hold a steady **“aaaah”** for about 4 seconds, 10–15 cm from the "
-            "microphone, in a quiet room.")
+st.markdown("Hold a steady **“aaaah”** for **4–5 seconds** (or as long as is "
+            "comfortable), 10–15 cm from the microphone, in a quiet room. Only the "
+            "**steadiest 1.5 seconds** are measured — matching the length of the "
+            "clinical recordings the models were trained on — so the start, the end "
+            "and anything your microphone does to the tail are discarded.")
 with st.expander("Hear an example"):
     st.audio(str(HERE / f"ref_vowel_{gender}.wav"))
 vowel = st.audio_input("Record the vowel", key="vowel")
@@ -113,9 +116,37 @@ if go:
         else:
             st.success(f"**{verdict}** — p(old) = {res['prob_old']:.3f}")
 
-        c1, c2 = st.columns(2)
-        c1.metric("Young/old classifier", verdict, f"p(old) = {res['prob_old']:.2f}")
-        c2.metric("CNN age estimate", f"≈ {res['cnn_age']:.0f} years")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Voice quality only", verdict, f"p(old) = {res['prob_old']:.2f}",
+                  delta_color="off", help="Vowel + sex. Cannot be influenced by how "
+                                          "fast you speak. Validation AUC 0.74.")
+        c2.metric("Including speaking rate", res["label_rate"],
+                  f"p(old) = {res['prob_old_rate']:.2f}", delta_color="off",
+                  help="Adds the sentence. More accurate on the database "
+                       "(AUC 0.93) but responds to how fast you talk.")
+        c3.metric("CNN age estimate", f"≈ {res['cnn_age']:.0f} years")
+
+        if res["label"] != res["label_rate"]:
+            st.info(
+                f"**The two models disagree, and that is informative.** The verdict "
+                f"uses voice quality only. The rate-sensitive model reads "
+                f"**{res['label_rate']}**, driven largely by how long the sentence took "
+                f"({res['features']['Phrase_Duration_s']:.2f} s — the database median is "
+                f"1.7 s for young speakers and 2.5 s for those over 60). Speech does "
+                f"slow with age, but rate is voluntary, so talking slowly reads as older "
+                f"whatever your age.", icon="⏱️")
+
+        drift = res.get("vowel_drift_db", 0.0)
+        if abs(drift) > 6:
+            st.warning(
+                f"**Your microphone is processing the sound.** The vowel is "
+                f"{abs(drift):.0f} dB {'louder' if drift > 0 else 'quieter'} at the end "
+                f"than at the start — that is automatic gain control or noise "
+                f"suppression, which mistakes a steady vowel for background noise and "
+                f"ducks it after a couple of seconds. Only the steadiest 2 seconds were "
+                f"measured, so the result is still usable, but for clean data turn the "
+                f"processing off (Windows: Settings ▸ System ▸ Sound ▸ your microphone ▸ "
+                f"turn **Audio enhancements** off).", icon="🎛️")
 
         hnr = res["features"]["HNR_dB"]
         if hnr < 20:
@@ -135,9 +166,12 @@ if go:
 
 st.divider()
 st.caption(
-    f"Classifier: 10-model ensemble on vowel + sentence features, validation "
-    f"AUC {M.val_auc:.3f} (Saarbrücken Voice Database, speaker-grouped split). "
-    "Age estimate: small CNN over the sentence spectrogram. Example recordings "
-    "© Saarbrücken Voice Database, CC-BY 4.0. Recordings are analysed in memory "
-    "and are not stored."
+    f"Classifiers: 10-model ensembles trained on the Saarbrücken Voice Database "
+    f"(speaker-grouped split). Voice-quality model — vowel + sex, validation AUC "
+    f"{M.val_auc['voice']:.2f}, unaffected by speaking rate. Rate-sensitive model — "
+    f"adds the sentence, AUC {M.val_auc['full']:.2f}, but sentence duration is its "
+    f"strongest feature (r = +0.59 with age), so it partly measures how fast someone "
+    f"talks. Age estimate: small CNN over the sentence spectrogram. Example recordings "
+    f"© Saarbrücken Voice Database, CC-BY 4.0. Recordings are analysed in memory and "
+    f"are not stored."
 )
