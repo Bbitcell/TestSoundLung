@@ -18,10 +18,24 @@ st.set_page_config(page_title="SoundLung — Voice Age Screening",
 
 @st.cache_resource
 def load_models():
-    return SoundLungModels(HERE / "models.npz")
+    """Loads the weights, and fails with a readable message rather than a
+    traceback when only some of the three coupled files have been re-uploaded
+    (streamlit_app.py, soundlung_model.py and models.npz must match)."""
+    if not hasattr(SoundLungModels, "VARIANTS"):
+        return None, ("`soundlung_model.py` on the server is an older version than "
+                      "`streamlit_app.py`. Re-upload **soundlung_model.py** and "
+                      "**models.npz** to the repository.")
+    try:
+        return SoundLungModels(HERE / "models.npz"), None
+    except KeyError:
+        return None, ("`models.npz` on the server is an older version. Re-upload "
+                      "**models.npz** (and **soundlung_model.py**) to the repository.")
 
 
-M = load_models()
+M, load_error = load_models()
+if load_error:
+    st.error(f"**Model files are out of step.** {load_error}", icon="🧩")
+    st.stop()
 
 st.title("🎙️ SoundLung")
 st.caption("Research demo — estimates whether a speaker is young (18–30) or "
@@ -116,21 +130,23 @@ if go:
         else:
             st.success(f"**{verdict}** — p(old) = {res['prob_old']:.3f}")
 
+        label_rate = res.get("label_rate")
         c1, c2, c3 = st.columns(3)
         c1.metric("Voice quality only", verdict, f"p(old) = {res['prob_old']:.2f}",
                   delta_color="off", help="Vowel + sex. Cannot be influenced by how "
                                           "fast you speak. Validation AUC 0.74.")
-        c2.metric("Including speaking rate", res["label_rate"],
-                  f"p(old) = {res['prob_old_rate']:.2f}", delta_color="off",
-                  help="Adds the sentence. More accurate on the database "
-                       "(AUC 0.93) but responds to how fast you talk.")
+        if label_rate:
+            c2.metric("Including speaking rate", label_rate,
+                      f"p(old) = {res['prob_old_rate']:.2f}", delta_color="off",
+                      help="Adds the sentence. More accurate on the database "
+                           "(AUC 0.93) but responds to how fast you talk.")
         c3.metric("CNN age estimate", f"≈ {res['cnn_age']:.0f} years")
 
-        if res["label"] != res["label_rate"]:
+        if label_rate and res["label"] != label_rate:
             st.info(
                 f"**The two models disagree, and that is informative.** The verdict "
                 f"uses voice quality only. The rate-sensitive model reads "
-                f"**{res['label_rate']}**, driven largely by how long the sentence took "
+                f"**{label_rate}**, driven largely by how long the sentence took "
                 f"({res['features']['Phrase_Duration_s']:.2f} s — the database median is "
                 f"1.7 s for young speakers and 2.5 s for those over 60). Speech does "
                 f"slow with age, but rate is voluntary, so talking slowly reads as older "
@@ -143,7 +159,7 @@ if go:
                 f"{abs(drift):.0f} dB {'louder' if drift > 0 else 'quieter'} at the end "
                 f"than at the start — that is automatic gain control or noise "
                 f"suppression, which mistakes a steady vowel for background noise and "
-                f"ducks it after a couple of seconds. Only the steadiest 2 seconds were "
+                f"ducks it after a couple of seconds. Only the steadiest 1.5 seconds were "
                 f"measured, so the result is still usable, but for clean data turn the "
                 f"processing off (Windows: Settings ▸ System ▸ Sound ▸ your microphone ▸ "
                 f"turn **Audio enhancements** off).", icon="🎛️")
