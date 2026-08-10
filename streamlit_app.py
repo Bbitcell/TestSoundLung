@@ -16,20 +16,31 @@ st.set_page_config(page_title="SoundLung — Voice Age Screening",
                    page_icon="🎙️", layout="centered")
 
 
+REQUIRED_FORMAT = 3      # keep in step with export_models.FORMAT_VERSION
+
+
 @st.cache_resource
 def load_models():
-    """Loads the weights, and fails with a readable message rather than a
-    traceback when only some of the three coupled files have been re-uploaded
-    (streamlit_app.py, soundlung_model.py and models.npz must match)."""
-    if not hasattr(SoundLungModels, "VARIANTS"):
-        return None, ("`soundlung_model.py` on the server is an older version than "
-                      "`streamlit_app.py`. Re-upload **soundlung_model.py** and "
-                      "**models.npz** to the repository.")
+    """Loads the weights, failing with a readable message rather than a
+    traceback when the three coupled files (streamlit_app.py,
+    soundlung_model.py, models.npz) are not all at the same version."""
+    have = getattr(SoundLungModels, "FORMAT_VERSION", 0)
+    if have != REQUIRED_FORMAT:
+        return None, (f"`soundlung_model.py` is version {have or 'pre-1'}, but this "
+                      f"page needs version {REQUIRED_FORMAT}. Re-upload "
+                      f"**soundlung_model.py** *and* **models.npz**.")
     try:
-        return SoundLungModels(HERE / "models.npz"), None
-    except KeyError:
-        return None, ("`models.npz` on the server is an older version. Re-upload "
-                      "**models.npz** (and **soundlung_model.py**) to the repository.")
+        m = SoundLungModels(HERE / "models.npz")
+    except (ValueError, KeyError) as exc:
+        detail = (f"`models.npz` has no `{exc.args[0]}` entry."
+                  if isinstance(exc, KeyError) else str(exc))
+        return None, (f"{detail} Re-upload **models.npz** (and "
+                      f"**soundlung_model.py**) to the repository.")
+    missing = [v for v in ("robust", "voice", "full") if v not in m.val_auc]
+    if missing:
+        return None, (f"`models.npz` is missing the {', '.join(missing)} model(s). "
+                      f"Re-upload **models.npz**.")
+    return m, None
 
 
 M, load_error = load_models()

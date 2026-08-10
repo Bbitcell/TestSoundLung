@@ -204,12 +204,18 @@ class SoundLungModels:
     "full" (adds the sentence, including its duration — more accurate on the
     database but responds to how fast the speaker talks)."""
 
+    FORMAT_VERSION = 3      # must match the stamp written by export_models.py
     VARIANTS = ("robust", "voice", "full")
     VERDICT = "robust"      # immune to both microphone quality and speaking rate
 
     def __init__(self, npz_path):
         z = np.load(npz_path, allow_pickle=False)
         self.z = {k: z[k] for k in z.files}
+        found = int(self.z["format_version"]) if "format_version" in self.z else 0
+        if found != self.FORMAT_VERSION:
+            raise ValueError(
+                f"models.npz is format v{found}, but this soundlung_model.py expects "
+                f"v{self.FORMAT_VERSION}. Re-upload models.npz.")
         self.features = {v: [str(f) for f in self.z[f"{v}_features"]] for v in self.VARIANTS}
         self.val_auc = {v: float(self.z[f"{v}_val_auc"]) for v in self.VARIANTS}
         # per-variant thresholds tuned on validation; class-weighted training
